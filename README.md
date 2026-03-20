@@ -68,8 +68,13 @@ the variables in your shell environment — shell takes precedence.
 The server won't connect without this — exit your session and start a new one:
 
 ```bash
-claude --channels plugin:feishu@claude-feishu-plugin
+claude --dangerously-load-development-channels plugin:feishu@claude-feishu-plugin
 ```
+
+> **Note:** `--channels` requires the plugin to be on Claude's approved
+> channels allowlist, which is not yet available for third-party plugins.
+> Use `--dangerously-load-development-channels` instead — it has the same
+> functionality but skips the allowlist check.
 
 **5. Pair.**
 
