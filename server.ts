@@ -748,3 +748,35 @@ const wsClient = new Lark.WSClient({
 
 wsClient.start({ eventDispatcher })
 process.stderr.write('feishu channel: WebSocket long connection started\n')
+
+// ─── Lifecycle: auto-exit when parent (Claude Code) dies ──────────────────────
+
+function shutdown(reason: string): void {
+  process.stderr.write(`feishu channel: shutting down (${reason})\n`)
+  try { wsClient.close?.() } catch {}
+  process.exit(0)
+}
+
+// MCP runs over stdio. When Claude Code exits, our stdin gets closed / EOF.
+process.stdin.on('end', () => shutdown('stdin closed'))
+process.stdin.on('close', () => shutdown('stdin close event'))
+
+// Also handle explicit signals
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGHUP', () => shutdown('SIGHUP'))
+
+// Safety net: if stdin becomes unreadable, poll and exit.
+// Some runtimes don't fire 'end' reliably on pipe close.
+const stdinCheck = setInterval(() => {
+  try {
+    // When parent dies, stdin fd becomes invalid or unreadable
+    if (process.stdin.destroyed || process.stdin.readableEnded) {
+      clearInterval(stdinCheck)
+      shutdown('stdin destroyed (poll)')
+    }
+  } catch {
+    clearInterval(stdinCheck)
+    shutdown('stdin check error (poll)')
+  }
+}, 5000)
