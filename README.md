@@ -34,16 +34,24 @@ Custom App (自建应用):
    - Choose **WebSocket** mode (长连接) — no public domain needed
 4. Publish the app version and have a Feishu admin approve it.
 
-**2. Install the plugin.**
+**2. Add the marketplace and install the plugin.**
 
 These are Claude Code commands — run `claude` to start a session first.
 
-```
-/plugin install feishu@claude-feishu-plugin
-/reload-plugins
+First, register this repository as a plugin marketplace (only needed once):
+
+```bash
+claude plugin marketplace add V1ki/claude-feishu-plugin
 ```
 
-Check that `/feishu:configure` tab-completes. If not, restart your session.
+Then install the plugin:
+
+```bash
+claude plugin install feishu@claude-feishu-plugin
+```
+
+Restart your session or run `/reload-plugins`. Check that `/feishu:configure`
+tab-completes.
 
 **3. Give the server the credentials.**
 
@@ -59,7 +67,7 @@ the variables in your shell environment — shell takes precedence.
 
 The server won't connect without this — exit your session and start a new one:
 
-```
+```bash
 claude --channels plugin:feishu@claude-feishu-plugin
 ```
 
@@ -122,3 +130,10 @@ FEISHU_VERIFICATION_TOKEN=your_verification_token
 
 Then configure the callback URL in your Feishu app's Event Subscriptions to
 point to `http://your-host:9876`.
+
+## Uninstall
+
+```bash
+claude plugin uninstall feishu
+claude plugin marketplace remove claude-feishu-plugin
+```
