@@ -18,21 +18,62 @@ message to your Claude Code session.
 
 **1. Create a Feishu bot.**
 
-Go to [Feishu Open Platform](https://open.feishu.cn/app) and create a new
-Custom App (自建应用):
+Go to [Feishu Open Platform](https://open.feishu.cn/app) → **Create Custom
+App** (创建自建应用). Give it a name (e.g. "ClaudeCode") and description.
 
-1. In **Credentials & Basic Info** (凭证与基础信息), copy the **App ID** and
-   **App Secret**.
-2. Under **Permissions & Scopes** (权限管理), add these scopes:
-   - `im:message` — Send messages
-   - `im:message:send_as_bot` — Send messages as bot
-   - `im:resource` — Download message resources (images/files)
-   - `im:message.reactions:write` — Write message reactions
-   - `im:chat:readonly` — Read chat info
-3. Under **Event Subscriptions** (事件订阅):
-   - Enable `im.message.receive_v1` (Receive messages)
-   - Choose **WebSocket** mode (长连接) — no public domain needed
-4. Publish the app version and have a Feishu admin approve it.
+**1a. Copy credentials**
+
+Left menu → **Credentials & Basic Info** (凭证与基础信息):
+- Copy **App ID** (`cli_xxx`) and **App Secret** — you'll need these in step 3.
+
+**1b. Add bot capability**
+
+Left menu → **App Features** (应用能力) → **Bot** (机器人):
+- Toggle **Enable Bot** on. This makes the app appear as a bot users can DM.
+
+**1c. Configure permissions**
+
+Left menu → **Permissions & Scopes** (权限管理) → **API Permissions**:
+
+| Scope | Description | Required |
+|---|---|---|
+| `im:message` | Read messages | ✅ |
+| `im:message:send_as_bot` | Send messages as bot | ✅ |
+| `im:resource` | Download images/files from messages | ✅ for photos |
+| `im:message.reactions:write` | Add emoji reactions | Optional (for `ackReaction`) |
+| `im:chat:readonly` | Read chat info | Optional |
+
+Search each scope name and click **Activate** (开通).
+
+**1d. Configure event subscriptions** ⚠️ This step is critical
+
+Left menu → **Event Subscriptions** (事件与回调):
+
+1. **Subscription method** (订阅方式) — select **Long Connection** (使用长连接
+   接收事件). This is the WebSocket mode, no public URL needed.
+2. Click **Add Event** (添加事件) → search `im.message.receive_v1` → add it.
+   The full name is "Receive Messages v2.0" (接收消息 v2.0).
+
+> ⚠️ If you skip this step or choose HTTP callback instead of Long Connection,
+> the bot will be able to **send** messages but **not receive** them. This is
+> the most common setup mistake.
+
+**1e. Publish and approve**
+
+Left menu → **App Release** (版本管理与发布):
+- Click **Create Version** (创建版本) → fill in version notes → **Submit**
+  (提交发布).
+- A Feishu **admin** in your organization needs to approve the release in the
+  [Admin Console](https://feishu.cn/admin/appCenter/audit). For personal/test
+  tenants where you are the admin, it may auto-approve.
+
+> After any permission or event subscription change, you must **publish a new
+> version** for it to take effect. This is easy to forget.
+
+**1f. Verify the bot is live**
+
+Open Feishu → search your bot name → you should see it as a contact. If not,
+check that the version is published and approved.
 
 **2. Add the marketplace and install the plugin.**
 
@@ -155,6 +196,34 @@ This plugin emulates the Telegram/Discord "last-writer-wins" behavior:
 
 If you need truly independent sessions receiving from the same bot, create
 separate Feishu apps (each with its own App ID / App Secret).
+
+## Troubleshooting
+
+**Bot sends messages but doesn't receive them**
+
+Most common cause: event subscription not configured correctly.
+1. Go to Feishu Open Platform → your app → **Event Subscriptions**
+2. Confirm subscription method is **Long Connection** (长连接), not HTTP
+3. Confirm `im.message.receive_v1` is listed under subscribed events
+4. Make sure you **published a new version** after adding the event
+5. Check for orphan processes: `ps aux | grep "bun.*server.ts"` — kill any
+   stale ones
+
+**Pairing code received, but subsequent messages don't arrive**
+
+The plugin works. After pairing, close and restart Claude Code with the
+`--dangerously-load-development-channels` flag.
+
+**`reply failed: chat oc_xxx is not allowlisted`**
+
+This happens on the first message after pairing. The fix is already included —
+the `allowedChatIds` runtime set tracks `chat_id ↔ sender` mapping. If you
+see this error, update to the latest plugin version.
+
+**Multiple Claude Code sessions, only one receives messages**
+
+Expected behavior — see [Multiple Claude Code sessions](#multiple-claude-code-sessions).
+The newest session always takes over.
 
 ## Uninstall
 
