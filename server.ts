@@ -719,35 +719,35 @@ const eventDispatcher = new Lark.EventDispatcher({
   },
 })
 
-// ─── Singleton lock ───────────────────────────────────────────────────────────
-// Feishu WebSocket dispatches each event to only ONE connected client per App.
-// If multiple Claude Code sessions run the feishu channel simultaneously, only
-// one will receive messages. We use a lock file to ensure only one instance
-// starts the WebSocket connection; others still provide the reply/react/edit
-// tools (so the user can still send) but won't receive inbound messages.
+// ─── Last-writer-wins takeover ────────────────────────────────────────────────
+// Telegram/Discord: the newest session always takes over the bot connection,
+// kicking the previous one offline. Feishu WebSocket doesn't do this natively
+// (multiple connections coexist, events go to only one unpredictably).
+//
+// We emulate last-writer-wins: on boot, kill any previous feishu server process,
+// then start our own WebSocket. The newest Claude Code session always receives
+// inbound messages; older sessions lose their connection but keep reply tools.
 
 const LOCK_FILE = join(STATE_DIR, '.ws.lock')
-let isWSOwner = false
 
-function acquireLock(): boolean {
+function takeoverLock(): void {
   mkdirSync(STATE_DIR, { recursive: true })
   try {
-    // Check if existing lock is held by a live process
     const existing = readFileSync(LOCK_FILE, 'utf8').trim()
     const pid = parseInt(existing, 10)
     if (pid && pid !== process.pid) {
       try {
-        process.kill(pid, 0) // signal 0 = check if alive
-        return false // another process holds the lock
+        // Signal the old process to exit gracefully
+        process.kill(pid, 'SIGTERM')
+        process.stderr.write(`feishu channel: sent SIGTERM to previous instance (pid ${pid})\n`)
       } catch {
-        // Process is dead, stale lock — take over
+        // Already dead — fine
       }
     }
   } catch {
-    // No lock file — we can take it
+    // No lock file — first instance
   }
   writeFileSync(LOCK_FILE, `${process.pid}\n`, { mode: 0o600 })
-  return true
 }
 
 function releaseLock(): void {
@@ -778,41 +778,17 @@ try {
   process.stderr.write(`feishu channel: failed to get bot info: ${err}\n`)
 }
 
-// Start WebSocket long connection (only if we hold the lock)
-let wsClient: InstanceType<typeof Lark.WSClient> | null = null
+// Take over: kill any previous instance, claim the lock, start WebSocket
+takeoverLock()
 
-isWSOwner = acquireLock()
-if (isWSOwner) {
-  wsClient = new Lark.WSClient({
-    appId: APP_ID,
-    appSecret: APP_SECRET,
-    domain: isLark ? Lark.Domain.Lark : Lark.Domain.Feishu,
-    loggerLevel: Lark.LoggerLevel.info,
-  })
-  wsClient.start({ eventDispatcher })
-  process.stderr.write('feishu channel: WebSocket long connection started (primary instance)\n')
-} else {
-  process.stderr.write(
-    'feishu channel: another instance holds the WebSocket connection. ' +
-    'This session can send messages but will not receive inbound messages. ' +
-    'Close the other Claude Code session to take over.\n',
-  )
-  // Periodically try to acquire the lock in case the primary dies
-  const lockRetry = setInterval(() => {
-    if (acquireLock()) {
-      clearInterval(lockRetry)
-      isWSOwner = true
-      wsClient = new Lark.WSClient({
-        appId: APP_ID,
-        appSecret: APP_SECRET,
-        domain: isLark ? Lark.Domain.Lark : Lark.Domain.Feishu,
-        loggerLevel: Lark.LoggerLevel.info,
-      })
-      wsClient.start({ eventDispatcher })
-      process.stderr.write('feishu channel: acquired WebSocket lock, now receiving messages\n')
-    }
-  }, 10_000)
-}
+let wsClient: InstanceType<typeof Lark.WSClient> | null = new Lark.WSClient({
+  appId: APP_ID,
+  appSecret: APP_SECRET,
+  domain: isLark ? Lark.Domain.Lark : Lark.Domain.Feishu,
+  loggerLevel: Lark.LoggerLevel.info,
+})
+wsClient.start({ eventDispatcher })
+process.stderr.write('feishu channel: WebSocket started (took over from any previous instance)\n')
 
 // ─── Lifecycle: auto-exit when parent (Claude Code) dies ──────────────────────
 

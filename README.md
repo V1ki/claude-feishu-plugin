@@ -133,7 +133,28 @@ means:
 - **No public IP or domain needed** — works in local dev environments
 - **No firewall / whitelist config** — just outbound internet access
 - Authentication happens at connection time; subsequent events are plaintext
-- If multiple instances of the same app connect, only one receives each event
+
+## Multiple Claude Code sessions
+
+One Feishu bot = one WebSocket connection that receives events. Unlike
+Telegram/Discord (where the newest connection automatically kicks the old one),
+Feishu allows multiple connections to coexist but only delivers each event to
+**one of them unpredictably**.
+
+This plugin emulates the Telegram/Discord "last-writer-wins" behavior:
+
+- **Newest session always takes over.** When a new session starts, it sends
+  SIGTERM to the previous feishu server process and claims the WebSocket
+  connection.
+- **Old sessions keep reply tools.** The terminated server process exits
+  cleanly; its Claude Code session loses inbound messages but can still use
+  `reply` / `react` / `edit_message` via the Feishu REST API (no WebSocket
+  needed for outbound).
+- **Automatic cleanup.** When Claude Code exits, the server detects stdin
+  close and shuts down, releasing the lock for the next session.
+
+If you need truly independent sessions receiving from the same bot, create
+separate Feishu apps (each with its own App ID / App Secret).
 
 ## Uninstall
 
