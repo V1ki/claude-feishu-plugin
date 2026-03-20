@@ -90,13 +90,12 @@ those are the only lines).
 
 These can be added to `~/.claude/channels/feishu/.env`:
 
-- `FEISHU_VERIFICATION_TOKEN` — Event verification token (from Feishu Open
-  Platform → Event Subscriptions). Used to verify HTTP callback requests.
-- `FEISHU_ENCRYPT_KEY` — Event encrypt key for decrypting event payloads.
-- `FEISHU_API_BASE` — API base URL. Default: `https://open.feishu.cn/open-apis`.
-  For Lark (international), use `https://open.larksuite.com/open-apis`.
-- `FEISHU_CALLBACK_PORT` — If set, starts an HTTP callback server on this
-  port as a fallback/alternative to WebSocket.
+- `FEISHU_ENCRYPT_KEY` — Event encrypt key (from Feishu Open Platform →
+  Event Subscriptions). Used by the SDK for data decryption if configured.
+- `FEISHU_VERIFICATION_TOKEN` — Event verification token. Used by the SDK
+  for event signature verification if configured.
+- `FEISHU_API_BASE` — Set to `https://open.larksuite.com/open-apis` for
+  Lark (international). Default uses Feishu (China) domain.
 
 ---
 

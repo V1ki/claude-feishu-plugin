@@ -6,8 +6,8 @@
  * group support with mention-triggering. State lives in
  * ~/.claude/channels/feishu/access.json — managed by the /feishu:access skill.
  *
- * Uses Feishu's WebSocket long-connection mode (no public domain needed).
- * Reply-only tools similar to the Telegram plugin.
+ * Uses @larksuiteoapi/node-sdk WSClient for WebSocket long-connection mode
+ * (no public domain needed). Reply-only tools similar to the Telegram plugin.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -16,6 +16,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import * as Lark from '@larksuiteoapi/node-sdk'
 import { randomBytes } from 'crypto'
 import {
   readFileSync,
@@ -29,7 +30,6 @@ import {
 } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
-import WebSocket from 'ws'
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'feishu')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -47,12 +47,9 @@ try {
 
 const APP_ID = process.env.FEISHU_APP_ID
 const APP_SECRET = process.env.FEISHU_APP_SECRET
-const VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN
 const ENCRYPT_KEY = process.env.FEISHU_ENCRYPT_KEY
+const VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN
 const STATIC = process.env.FEISHU_ACCESS_MODE === 'static'
-
-// Feishu API base — supports both Feishu (China) and Lark (International)
-const API_BASE = process.env.FEISHU_API_BASE ?? 'https://open.feishu.cn/open-apis'
 
 if (!APP_ID || !APP_SECRET) {
   process.stderr.write(
@@ -65,193 +62,127 @@ if (!APP_ID || !APP_SECRET) {
   process.exit(1)
 }
 
-// ─── Feishu API helpers ───────────────────────────────────────────────────────
+// ─── Lark SDK Client ──────────────────────────────────────────────────────────
 
-let tenantAccessToken = ''
-let tokenExpiresAt = 0
+const isLark = (process.env.FEISHU_API_BASE ?? '').includes('larksuite')
 
-async function refreshToken(): Promise<void> {
-  const now = Date.now()
-  if (tenantAccessToken && now < tokenExpiresAt - 60_000) return
+const larkClient = new Lark.Client({
+  appId: APP_ID,
+  appSecret: APP_SECRET,
+  appType: Lark.AppType.SelfBuild,
+  domain: isLark ? Lark.Domain.Lark : Lark.Domain.Feishu,
+})
 
-  const res = await fetch(`${API_BASE}/auth/v3/tenant_access_token/internal`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: APP_ID, app_secret: APP_SECRET }),
-  })
-  const data = (await res.json()) as {
-    code: number
-    msg: string
-    tenant_access_token: string
-    expire: number
-  }
-  if (data.code !== 0) throw new Error(`Feishu token refresh failed: ${data.msg}`)
-  tenantAccessToken = data.tenant_access_token
-  tokenExpiresAt = now + data.expire * 1000
-}
+// ─── Send helpers ─────────────────────────────────────────────────────────────
 
-async function feishuAPI(
-  path: string,
-  opts: { method?: string; body?: unknown; query?: Record<string, string> } = {},
-): Promise<any> {
-  await refreshToken()
-  const url = new URL(`${API_BASE}${path}`)
-  if (opts.query) {
-    for (const [k, v] of Object.entries(opts.query)) url.searchParams.set(k, v)
-  }
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${tenantAccessToken}`,
-    'Content-Type': 'application/json',
-  }
-  const res = await fetch(url.toString(), {
-    method: opts.method ?? (opts.body ? 'POST' : 'GET'),
-    headers,
-    ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
-  })
-  return res.json()
-}
-
-async function feishuUpload(
-  path: string,
-  formData: FormData,
-): Promise<any> {
-  await refreshToken()
-  const url = `${API_BASE}${path}`
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${tenantAccessToken}`,
-    },
-    body: formData,
-  })
-  return res.json()
-}
-
-// ─── Send message ─────────────────────────────────────────────────────────────
+const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
+const MAX_CHUNK_LIMIT = 4096
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 async function sendMessage(
   chatId: string,
   text: string,
   replyMessageId?: string,
 ): Promise<string> {
-  const body: any = {
-    receive_id: chatId,
-    msg_type: 'text',
-    content: JSON.stringify({ text }),
-  }
   if (replyMessageId) {
-    body.reply_in_thread = false
-  }
-  const query: Record<string, string> = { receive_id_type: 'chat_id' }
-  let path = '/im/v1/messages'
-  if (replyMessageId) {
-    path = `/im/v1/messages/${replyMessageId}/reply`
-    delete body.receive_id
-    delete query.receive_id_type
-  }
-  const data = await feishuAPI(path, { method: 'POST', body, query })
-  if (data.code !== 0) throw new Error(`Feishu send failed: ${data.msg}`)
-  return data.data?.message_id ?? ''
-}
-
-async function sendFileMessage(
-  chatId: string,
-  filePath: string,
-): Promise<string> {
-  const ext = extname(filePath).toLowerCase()
-  const isImage = PHOTO_EXTS.has(ext)
-
-  if (isImage) {
-    // Upload image first, then send image message
-    const imageKey = await uploadImage(filePath)
-    const body = {
-      receive_id: chatId,
-      msg_type: 'image',
-      content: JSON.stringify({ image_key: imageKey }),
-    }
-    const data = await feishuAPI('/im/v1/messages', {
-      method: 'POST',
-      body,
-      query: { receive_id_type: 'chat_id' },
+    const res = await larkClient.im.message.reply({
+      path: { message_id: replyMessageId },
+      data: {
+        msg_type: 'text',
+        content: JSON.stringify({ text }),
+      },
     })
-    if (data.code !== 0) throw new Error(`Feishu send image failed: ${data.msg}`)
-    return data.data?.message_id ?? ''
-  } else {
-    // Upload as file, then send file message
-    const fileKey = await uploadFile(filePath)
-    const body = {
-      receive_id: chatId,
-      msg_type: 'file',
-      content: JSON.stringify({ file_key: fileKey }),
-    }
-    const data = await feishuAPI('/im/v1/messages', {
-      method: 'POST',
-      body,
-      query: { receive_id_type: 'chat_id' },
-    })
-    if (data.code !== 0) throw new Error(`Feishu send file failed: ${data.msg}`)
-    return data.data?.message_id ?? ''
+    return (res as any)?.data?.message_id ?? ''
   }
-}
-
-async function uploadImage(filePath: string): Promise<string> {
-  const fileContent = readFileSync(filePath)
-  const fileName = filePath.split('/').pop() ?? 'image.png'
-  const formData = new FormData()
-  formData.append('image_type', 'message')
-  formData.append('image', new Blob([fileContent]), fileName)
-  const data = await feishuUpload('/im/v1/images', formData)
-  if (data.code !== 0) throw new Error(`Feishu image upload failed: ${data.msg}`)
-  return data.data?.image_key ?? ''
-}
-
-async function uploadFile(filePath: string): Promise<string> {
-  const fileContent = readFileSync(filePath)
-  const fileName = filePath.split('/').pop() ?? 'file'
-  const stat = statSync(filePath)
-  const formData = new FormData()
-  formData.append('file_type', 'stream')
-  formData.append('file_name', fileName)
-  formData.append('file', new Blob([fileContent]), fileName)
-  const data = await feishuUpload('/im/v1/files', formData)
-  if (data.code !== 0) throw new Error(`Feishu file upload failed: ${data.msg}`)
-  return data.data?.file_key ?? ''
-}
-
-async function editMessage(messageId: string, text: string): Promise<void> {
-  const data = await feishuAPI(`/im/v1/messages/${messageId}`, {
-    method: 'PUT',
-    body: {
+  const res = await larkClient.im.message.create({
+    params: { receive_id_type: 'chat_id' },
+    data: {
+      receive_id: chatId,
       msg_type: 'text',
       content: JSON.stringify({ text }),
     },
   })
-  if (data.code !== 0) throw new Error(`Feishu edit failed: ${data.msg}`)
+  return (res as any)?.data?.message_id ?? ''
+}
+
+async function sendFileMessage(chatId: string, filePath: string): Promise<string> {
+  const ext = extname(filePath).toLowerCase()
+  const isImage = PHOTO_EXTS.has(ext)
+  const fileContent = readFileSync(filePath)
+  const fileName = filePath.split('/').pop() ?? 'file'
+
+  if (isImage) {
+    const uploadRes = await larkClient.im.image.create({
+      data: {
+        image_type: 'message',
+        image: Buffer.from(fileContent),
+      },
+    })
+    const imageKey = (uploadRes as any)?.data?.image_key
+    if (!imageKey) throw new Error('Image upload failed: no image_key returned')
+
+    const res = await larkClient.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: chatId,
+        msg_type: 'image',
+        content: JSON.stringify({ image_key: imageKey }),
+      },
+    })
+    return (res as any)?.data?.message_id ?? ''
+  } else {
+    const uploadRes = await larkClient.im.file.create({
+      data: {
+        file_type: 'stream',
+        file_name: fileName,
+        file: Buffer.from(fileContent),
+      },
+    })
+    const fileKey = (uploadRes as any)?.data?.file_key
+    if (!fileKey) throw new Error('File upload failed: no file_key returned')
+
+    const res = await larkClient.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: chatId,
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: fileKey }),
+      },
+    })
+    return (res as any)?.data?.message_id ?? ''
+  }
+}
+
+async function editMessage(messageId: string, text: string): Promise<void> {
+  await larkClient.im.message.update({
+    path: { message_id: messageId },
+    data: {
+      msg_type: 'text',
+      content: JSON.stringify({ text }),
+    },
+  })
 }
 
 async function addReaction(messageId: string, emoji: string): Promise<void> {
-  const data = await feishuAPI(`/im/v1/messages/${messageId}/reactions`, {
-    method: 'POST',
-    body: {
+  await larkClient.im.messageReaction.create({
+    path: { message_id: messageId },
+    data: {
       reaction_type: { emoji_type: emoji },
     },
   })
-  if (data.code !== 0) throw new Error(`Feishu reaction failed: ${data.msg}`)
 }
 
 async function downloadImage(messageId: string, imageKey: string): Promise<string | undefined> {
   try {
-    await refreshToken()
-    const url = `${API_BASE}/im/v1/messages/${messageId}/resources/${imageKey}?type=image`
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${tenantAccessToken}` },
+    const res = await larkClient.im.messageResource.get({
+      path: { message_id: messageId, file_key: imageKey },
+      params: { type: 'image' },
     })
-    if (!res.ok) return undefined
-    const buf = Buffer.from(await res.arrayBuffer())
-    const path = join(INBOX_DIR, `${Date.now()}-${imageKey}.png`)
+    // The SDK returns a readable stream via writeFile / getReadableStream
+    const filePath = join(INBOX_DIR, `${Date.now()}-${imageKey}.png`)
     mkdirSync(INBOX_DIR, { recursive: true })
-    writeFileSync(path, buf)
-    return path
+    await (res as any).writeFile(filePath)
+    return filePath
   } catch (err) {
     process.stderr.write(`feishu channel: image download failed: ${err}\n`)
     return undefined
@@ -259,11 +190,6 @@ async function downloadImage(messageId: string, imageKey: string): Promise<strin
 }
 
 // ─── Access control ───────────────────────────────────────────────────────────
-
-const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
-
-const MAX_CHUNK_LIMIT = 4096 // Feishu text messages have no strict char limit, but we keep a reasonable default
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 function assertSendable(f: string): void {
   let real: string, stateReal: string
@@ -305,12 +231,7 @@ type Access = {
 }
 
 function defaultAccess(): Access {
-  return {
-    dmPolicy: 'pairing',
-    allowFrom: [],
-    groups: {},
-    pending: {},
-  }
+  return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} }
 }
 
 function readAccessFile(): Access {
@@ -342,9 +263,7 @@ const BOOT_ACCESS: Access | null = STATIC
   ? (() => {
       const a = readAccessFile()
       if (a.dmPolicy === 'pairing') {
-        process.stderr.write(
-          'feishu channel: static mode — dmPolicy "pairing" downgraded to "allowlist"\n',
-        )
+        process.stderr.write('feishu channel: static mode — dmPolicy "pairing" downgraded to "allowlist"\n')
         a.dmPolicy = 'allowlist'
       }
       a.pending = {}
@@ -400,7 +319,7 @@ function gate(senderId: string, chatId: string, chatType: string): GateResult {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
     if (access.dmPolicy === 'allowlist') return { action: 'drop' }
 
-    // pairing mode — check for existing non-expired code for this sender
+    // pairing mode
     for (const [code, p] of Object.entries(access.pending)) {
       if (p.senderId === senderId) {
         if ((p.replies ?? 1) >= 2) return { action: 'drop' }
@@ -431,7 +350,6 @@ function gate(senderId: string, chatId: string, chatType: string): GateResult {
     if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
       return { action: 'drop' }
     }
-    // requireMention is checked by the caller before calling gate
     return { action: 'deliver', access }
   }
 
@@ -514,7 +432,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         'Reply on Feishu. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
-        type: 'object',
+        type: 'object' as const,
         properties: {
           chat_id: { type: 'string', description: 'Feishu chat ID to send to.' },
           text: { type: 'string', description: 'Message text.' },
@@ -534,15 +452,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'react',
       description:
-        'Add an emoji reaction to a Feishu message by ID. Feishu supports standard emoji types like THUMBSUP, HEART, SMILE, etc.',
+        'Add an emoji reaction to a Feishu message by ID. Uses Feishu emoji types like THUMBSUP, HEART, SMILE, OK, JIAYI, etc.',
       inputSchema: {
-        type: 'object',
+        type: 'object' as const,
         properties: {
           message_id: { type: 'string' },
           emoji: {
             type: 'string',
-            description:
-              'Feishu emoji type, e.g. "THUMBSUP", "HEART", "OK", "SMILE", "JIAYI" etc.',
+            description: 'Feishu emoji type, e.g. "THUMBSUP", "HEART", "OK", "SMILE", "JIAYI".',
           },
         },
         required: ['message_id', 'emoji'],
@@ -552,7 +469,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'edit_message',
       description: 'Edit a message the bot previously sent. Only works on the bot\'s own messages.',
       inputSchema: {
-        type: 'object',
+        type: 'object' as const,
         properties: {
           message_id: { type: 'string' },
           text: { type: 'string' },
@@ -588,7 +505,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           ids.push(id)
         }
 
-        // Send file attachments
         const files = (args.files as string[]) ?? []
         for (const f of files) {
           assertSendable(f)
@@ -630,49 +546,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 })
 
-// ─── Feishu WebSocket connection ──────────────────────────────────────────────
+// ─── Feishu event handling ────────────────────────────────────────────────────
 
 let botOpenId = ''
-
-// Feishu event message structure
-interface FeishuEvent {
-  schema?: string
-  header?: {
-    event_id: string
-    event_type: string
-    create_time: string
-    token: string
-    app_id: string
-    tenant_key: string
-  }
-  event?: {
-    sender?: {
-      sender_id?: {
-        open_id?: string
-        user_id?: string
-        union_id?: string
-      }
-      sender_type?: string
-      tenant_key?: string
-    }
-    message?: {
-      message_id?: string
-      root_id?: string
-      parent_id?: string
-      create_time?: string
-      chat_id?: string
-      chat_type?: string
-      message_type?: string
-      content?: string
-      mentions?: Array<{
-        key: string
-        id: { open_id?: string; user_id?: string; union_id?: string }
-        name: string
-        tenant_key?: string
-      }>
-    }
-  }
-}
 
 // Dedup: track processed event IDs (keep last 1000)
 const processedEvents = new Set<string>()
@@ -688,311 +564,177 @@ function dedup(eventId: string): boolean {
   return false
 }
 
-function isMentioned(event: FeishuEvent, extraPatterns?: string[]): boolean {
-  const mentions = event.event?.message?.mentions ?? []
-  for (const m of mentions) {
+function isMentioned(
+  mentions: Array<{ key: string; id: { open_id?: string }; name: string }> | undefined,
+  text: string,
+  parentId: string | undefined,
+  extraPatterns?: string[],
+): boolean {
+  for (const m of mentions ?? []) {
     if (m.id?.open_id === botOpenId) return true
   }
-
-  // Check text content for mention patterns
-  const text = extractText(event)
   for (const pat of extraPatterns ?? []) {
     try {
       if (new RegExp(pat, 'i').test(text)) return true
     } catch {}
   }
-
   // Reply to bot's message counts as implicit mention
-  if (event.event?.message?.parent_id) return true
-
+  if (parentId) return true
   return false
 }
 
-function extractText(event: FeishuEvent): string {
-  try {
-    const content = JSON.parse(event.event?.message?.content ?? '{}')
-    return content.text ?? ''
-  } catch {
-    return ''
-  }
-}
+// The event dispatcher — registered with WSClient below
+const eventDispatcher = new Lark.EventDispatcher({
+  encryptKey: ENCRYPT_KEY ?? '',
+  verificationToken: VERIFICATION_TOKEN ?? '',
+}).register({
+  'im.message.receive_v1': async (data: any) => {
+    const eventId = data?.event_id ?? `${Date.now()}-${Math.random()}`
+    if (dedup(eventId)) return
 
-async function handleFeishuEvent(event: FeishuEvent): Promise<void> {
-  const eventType = event.header?.event_type
-  const eventId = event.header?.event_id
+    const message = data?.message
+    const sender = data?.sender
+    if (!message || !sender) return
 
-  if (!eventId || dedup(eventId)) return
+    // Ignore bot's own messages
+    if (sender.sender_type === 'app') return
 
-  // Only handle message receive events
-  if (eventType !== 'im.message.receive_v1') return
+    const senderId: string = sender.sender_id?.open_id ?? ''
+    const chatId: string = message.chat_id ?? ''
+    const chatType: string = message.chat_type ?? ''
+    const messageId: string = message.message_id ?? ''
+    const parentId: string | undefined = message.parent_id ?? message.root_id
 
-  const message = event.event?.message
-  const sender = event.event?.sender
-  if (!message || !sender) return
-
-  // Ignore bot's own messages
-  if (sender.sender_type === 'app') return
-
-  const senderId = sender.sender_id?.open_id ?? ''
-  const chatId = message.chat_id ?? ''
-  const chatType = message.chat_type ?? ''
-  const messageId = message.message_id ?? ''
-
-  // For groups, check mention before gating
-  if (chatType === 'group') {
-    const access = loadAccess()
-    const policy = access.groups[chatId]
-    if (policy?.requireMention !== false && !isMentioned(event, access.mentionPatterns)) {
-      return
-    }
-  }
-
-  const result = gate(senderId, chatId, chatType)
-
-  if (result.action === 'drop') return
-
-  if (result.action === 'pair') {
-    const lead = result.isResend ? '配对仍在等待中' : '需要配对'
-    await sendMessage(
-      chatId,
-      `${lead} — 在 Claude Code 中运行:\n\n/feishu:access pair ${result.code}`,
-    )
-    return
-  }
-
-  const access = result.access
-
-  // Ack reaction
-  if (access.ackReaction && messageId) {
-    void addReaction(messageId, access.ackReaction).catch(() => {})
-  }
-
-  // Extract text content
-  let text = ''
-  let imagePath: string | undefined
-
-  if (message.message_type === 'text') {
-    text = extractText(event)
-    // Remove @mention text from the message
-    const mentions = message.mentions ?? []
-    for (const m of mentions) {
-      text = text.replace(m.key, '').trim()
-    }
-  } else if (message.message_type === 'image') {
-    try {
-      const content = JSON.parse(message.content ?? '{}')
-      const imageKey = content.image_key
-      if (imageKey && messageId) {
-        imagePath = await downloadImage(messageId, imageKey)
-      }
-    } catch {}
-    text = '(image)'
-  } else if (message.message_type === 'post') {
-    // Rich text — extract plain text
-    try {
-      const content = JSON.parse(message.content ?? '{}')
-      // Post content structure: { title, content: [[{tag, text/href}]] }
-      const lines: string[] = []
-      if (content.title) lines.push(content.title)
-      for (const para of content.content ?? []) {
-        const parts: string[] = []
-        for (const el of para ?? []) {
-          if (el.tag === 'text') parts.push(el.text ?? '')
-          else if (el.tag === 'a') parts.push(el.text ?? el.href ?? '')
-          else if (el.tag === 'at') {
-            // skip @mentions
-          }
-        }
-        lines.push(parts.join(''))
-      }
-      text = lines.join('\n')
-    } catch {
-      text = '(rich text)'
-    }
-  } else if (message.message_type === 'file') {
-    text = '(file attachment)'
-  } else {
-    text = `(${message.message_type ?? 'unknown'} message)`
-  }
-
-  if (!text && !imagePath) return
-
-  // Forward to MCP
-  void mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: text || '(image)',
-      meta: {
-        chat_id: chatId,
-        ...(messageId ? { message_id: messageId } : {}),
-        user: senderId,
-        user_id: senderId,
-        ts: new Date(Number(message.create_time ?? '0')).toISOString(),
-        ...(imagePath ? { image_path: imagePath } : {}),
-      },
-    },
-  })
-}
-
-// ─── Feishu WebSocket long connection ─────────────────────────────────────────
-
-async function getWSEndpoint(): Promise<string> {
-  await refreshToken()
-  const res = await fetch(`${API_BASE}/callback/ws/endpoint`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${tenantAccessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({}),
-  })
-  const data = (await res.json()) as any
-  if (data.code !== 0) {
-    throw new Error(`Failed to get WebSocket endpoint: ${data.msg ?? JSON.stringify(data)}`)
-  }
-  return data.data?.URL ?? data.data?.url ?? ''
-}
-
-let ws: WebSocket | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let pingTimer: ReturnType<typeof setInterval> | null = null
-
-function connectWS(): void {
-  void (async () => {
-    try {
-      const endpoint = await getWSEndpoint()
-      if (!endpoint) {
-        process.stderr.write('feishu channel: empty WebSocket endpoint, retrying in 10s\n')
-        scheduleReconnect(10000)
+    // For groups, check mention before gating
+    if (chatType === 'group') {
+      const access = loadAccess()
+      const policy = access.groups[chatId]
+      const mentions = message.mentions as Array<{ key: string; id: { open_id?: string }; name: string }> | undefined
+      const textContent = (() => {
+        try { return JSON.parse(message.content ?? '{}').text ?? '' } catch { return '' }
+      })()
+      if (policy?.requireMention !== false && !isMentioned(mentions, textContent, parentId, access.mentionPatterns)) {
         return
       }
-
-      ws = new WebSocket(endpoint)
-
-      ws.on('open', () => {
-        process.stderr.write('feishu channel: WebSocket connected\n')
-        // Send ping every 120s to keep alive
-        pingTimer = setInterval(() => {
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.ping()
-          }
-        }, 120_000)
-      })
-
-      ws.on('message', (data: Buffer) => {
-        try {
-          const msg = JSON.parse(data.toString())
-          
-          // Handle different frame types
-          if (msg.type === 'pong') return
-
-          // Event callback
-          if (msg.header?.event_type) {
-            void handleFeishuEvent(msg).catch((err) => {
-              process.stderr.write(`feishu channel: event handling error: ${err}\n`)
-            })
-          }
-        } catch (err) {
-          process.stderr.write(`feishu channel: message parse error: ${err}\n`)
-        }
-      })
-
-      ws.on('close', (code, reason) => {
-        process.stderr.write(
-          `feishu channel: WebSocket closed (${code}: ${reason?.toString() ?? 'no reason'})\n`,
-        )
-        cleanup()
-        scheduleReconnect(5000)
-      })
-
-      ws.on('error', (err) => {
-        process.stderr.write(`feishu channel: WebSocket error: ${err.message}\n`)
-        cleanup()
-        scheduleReconnect(5000)
-      })
-    } catch (err) {
-      process.stderr.write(`feishu channel: connection failed: ${err}\n`)
-      scheduleReconnect(10000)
     }
-  })()
-}
 
-function cleanup(): void {
-  if (pingTimer) {
-    clearInterval(pingTimer)
-    pingTimer = null
-  }
-  if (ws) {
-    try { ws.close() } catch {}
-    ws = null
-  }
-}
+    const result = gate(senderId, chatId, chatType)
 
-function scheduleReconnect(delay: number): void {
-  if (reconnectTimer) return
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    connectWS()
-  }, delay)
-}
+    if (result.action === 'drop') return
 
-// ─── Fallback: HTTP callback server ───────────────────────────────────────────
-// If FEISHU_CALLBACK_PORT is set, also start an HTTP server for event callbacks.
-// This is useful when WebSocket is not available or as a backup.
+    if (result.action === 'pair') {
+      const lead = result.isResend ? '配对仍在等待中' : '需要配对'
+      await sendMessage(
+        chatId,
+        `${lead} — 在 Claude Code 中运行:\n\n/feishu:access pair ${result.code}`,
+      )
+      return
+    }
 
-const CALLBACK_PORT = process.env.FEISHU_CALLBACK_PORT
-  ? parseInt(process.env.FEISHU_CALLBACK_PORT, 10)
-  : null
+    const access = result.access
 
-if (CALLBACK_PORT) {
-  const httpServer = Bun.serve({
-    port: CALLBACK_PORT,
-    async fetch(req: Request) {
-      if (req.method !== 'POST') {
-        return new Response('Method Not Allowed', { status: 405 })
-      }
+    // Ack reaction
+    if (access.ackReaction && messageId) {
+      void addReaction(messageId, access.ackReaction).catch(() => {})
+    }
 
+    // Extract text content
+    let text = ''
+    let imagePath: string | undefined
+
+    const msgType: string = message.message_type ?? ''
+
+    if (msgType === 'text') {
       try {
-        const body = await req.json() as any
-
-        // URL verification challenge
-        if (body.type === 'url_verification') {
-          return Response.json({ challenge: body.challenge })
-        }
-
-        // Verify token if configured
-        if (VERIFICATION_TOKEN && body.header?.token !== VERIFICATION_TOKEN) {
-          return new Response('Unauthorized', { status: 401 })
-        }
-
-        // Handle event asynchronously
-        void handleFeishuEvent(body).catch((err) => {
-          process.stderr.write(`feishu channel: callback event error: ${err}\n`)
-        })
-
-        return Response.json({ code: 0 })
-      } catch (err) {
-        return new Response('Bad Request', { status: 400 })
+        text = JSON.parse(message.content ?? '{}').text ?? ''
+      } catch {
+        text = ''
       }
-    },
-  })
-  process.stderr.write(`feishu channel: HTTP callback listening on port ${CALLBACK_PORT}\n`)
-}
+      // Remove @mention text from the message
+      const mentions = (message.mentions ?? []) as Array<{ key: string }>
+      for (const m of mentions) {
+        text = text.replace(m.key, '').trim()
+      }
+    } else if (msgType === 'image') {
+      try {
+        const content = JSON.parse(message.content ?? '{}')
+        const imageKey = content.image_key
+        if (imageKey && messageId) {
+          imagePath = await downloadImage(messageId, imageKey)
+        }
+      } catch {}
+      text = '(image)'
+    } else if (msgType === 'post') {
+      // Rich text — extract plain text
+      try {
+        const content = JSON.parse(message.content ?? '{}')
+        const lines: string[] = []
+        if (content.title) lines.push(content.title)
+        for (const para of content.content ?? []) {
+          const parts: string[] = []
+          for (const el of para ?? []) {
+            if (el.tag === 'text') parts.push(el.text ?? '')
+            else if (el.tag === 'a') parts.push(el.text ?? el.href ?? '')
+            // skip @mentions
+          }
+          lines.push(parts.join(''))
+        }
+        text = lines.join('\n')
+      } catch {
+        text = '(rich text)'
+      }
+    } else if (msgType === 'file') {
+      text = '(file attachment)'
+    } else {
+      text = `(${msgType || 'unknown'} message)`
+    }
+
+    if (!text && !imagePath) return
+
+    // Forward to MCP
+    void mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: text || '(image)',
+        meta: {
+          chat_id: chatId,
+          ...(messageId ? { message_id: messageId } : {}),
+          user: senderId,
+          user_id: senderId,
+          ts: new Date(Number(message.create_time ?? '0')).toISOString(),
+          ...(imagePath ? { image_path: imagePath } : {}),
+        },
+      },
+    })
+  },
+})
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 await mcp.connect(new StdioServerTransport())
 
-// Get bot info
+// Get bot info via raw request (no typed method on client)
 try {
-  const botInfo = await feishuAPI('/bot/v3/info')
-  botOpenId = botInfo.bot?.open_id ?? ''
-  process.stderr.write(
-    `feishu channel: connected as ${botInfo.bot?.app_name ?? 'unknown'} (${botOpenId})\n`,
-  )
+  const botInfo = await larkClient.request({
+    method: 'GET',
+    url: '/open-apis/bot/v3/info',
+    data: {},
+    params: {},
+  })
+  botOpenId = (botInfo as any)?.bot?.open_id ?? ''
+  const appName = (botInfo as any)?.bot?.app_name ?? 'unknown'
+  process.stderr.write(`feishu channel: bot identity: ${appName} (${botOpenId})\n`)
 } catch (err) {
   process.stderr.write(`feishu channel: failed to get bot info: ${err}\n`)
 }
 
-// Start WebSocket connection
-connectWS()
+// Start WebSocket long connection
+const wsClient = new Lark.WSClient({
+  appId: APP_ID,
+  appSecret: APP_SECRET,
+  domain: isLark ? Lark.Domain.Lark : Lark.Domain.Feishu,
+  loggerLevel: Lark.LoggerLevel.info,
+})
+
+wsClient.start({ eventDispatcher })
+process.stderr.write('feishu channel: WebSocket long connection started\n')

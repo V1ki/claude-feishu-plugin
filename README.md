@@ -118,18 +118,17 @@ For the international version (Lark), set in your `.env`:
 FEISHU_API_BASE=https://open.larksuite.com/open-apis
 ```
 
-## Optional: HTTP callback
+## How it works
 
-If WebSocket mode is unavailable, you can set `FEISHU_CALLBACK_PORT` to start
-an HTTP callback server:
+The plugin uses the official
+[@larksuiteoapi/node-sdk](https://github.com/larksuite/node-sdk) `WSClient`
+to establish a WebSocket long connection with the Feishu Open Platform. This
+means:
 
-```
-FEISHU_CALLBACK_PORT=9876
-FEISHU_VERIFICATION_TOKEN=your_verification_token
-```
-
-Then configure the callback URL in your Feishu app's Event Subscriptions to
-point to `http://your-host:9876`.
+- **No public IP or domain needed** — works in local dev environments
+- **No firewall / whitelist config** — just outbound internet access
+- Authentication happens at connection time; subsequent events are plaintext
+- If multiple instances of the same app connect, only one receives each event
 
 ## Uninstall
 
