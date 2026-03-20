@@ -1,0 +1,15 @@
+{
+  "name": "claude-feishu-plugin",
+  "description": "Feishu (飞书) channel plugin for Claude Code",
+  "owner": {
+    "name": "V1ki"
+  },
+  "plugins": [
+    {
+      "name": "feishu",
+      "description": "Feishu (Lark) messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /feishu:access.",
+      "category": "productivity",
+      "source": "."
+    }
+  ]
+}
