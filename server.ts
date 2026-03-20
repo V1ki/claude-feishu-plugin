@@ -275,7 +275,13 @@ function loadAccess(): Access {
   return BOOT_ACCESS ?? readAccessFile()
 }
 
+// Runtime set of chat_ids that have been validated through gate().
+// This maps chat_id (oc_xxx) back to allowed senders, since allowFrom
+// stores sender open_ids (ou_xxx) but reply tools receive chat_ids.
+const allowedChatIds = new Set<string>()
+
 function assertAllowedChat(chat_id: string): void {
+  if (allowedChatIds.has(chat_id)) return
   const access = loadAccess()
   if (access.allowFrom.includes(chat_id)) return
   if (chat_id in access.groups) return
@@ -316,7 +322,10 @@ function gate(senderId: string, chatId: string, chatType: string): GateResult {
 
   // Feishu: p2p = DM, group = group chat
   if (chatType === 'p2p') {
-    if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
+    if (access.allowFrom.includes(senderId)) {
+      allowedChatIds.add(chatId)
+      return { action: 'deliver', access }
+    }
     if (access.dmPolicy === 'allowlist') return { action: 'drop' }
 
     // pairing mode
@@ -350,6 +359,7 @@ function gate(senderId: string, chatId: string, chatType: string): GateResult {
     if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
       return { action: 'drop' }
     }
+    allowedChatIds.add(chatId)
     return { action: 'deliver', access }
   }
 
