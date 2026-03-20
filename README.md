@@ -6,6 +6,8 @@ The MCP server logs into Feishu as a bot and provides tools to Claude to reply,
 react, or edit messages. When you message the bot, the server forwards the
 message to your Claude Code session.
 
+> 📖 [中文文档](README_CN.md)
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) — the MCP server runs on Bun. Install with
@@ -16,22 +18,26 @@ message to your Claude Code session.
 > Default pairing flow for a single-user DM bot. See [ACCESS.md](ACCESS.md)
 > for groups and multi-user setups.
 
-**1. Create a Feishu bot.**
+### 1. Create a Feishu bot
 
 Go to [Feishu Open Platform](https://open.feishu.cn/app) → **Create Custom
 App** (创建自建应用). Give it a name (e.g. "ClaudeCode") and description.
 
-**1a. Copy credentials**
+#### 1a. Copy credentials
 
 Left menu → **Credentials & Basic Info** (凭证与基础信息):
 - Copy **App ID** (`cli_xxx`) and **App Secret** — you'll need these in step 3.
 
-**1b. Add bot capability**
+![Copy App ID and App Secret from Credentials page](images/step1a-credentials.png)
+
+#### 1b. Add bot capability
 
 Left menu → **App Features** (应用能力) → **Bot** (机器人):
 - Toggle **Enable Bot** on. This makes the app appear as a bot users can DM.
 
-**1c. Configure permissions**
+![Enable Bot capability](images/step1b-bot-capability.png)
+
+#### 1c. Configure permissions
 
 Left menu → **Permissions & Scopes** (权限管理) → **API Permissions**:
 
@@ -45,7 +51,12 @@ Left menu → **Permissions & Scopes** (权限管理) → **API Permissions**:
 
 Search each scope name and click **Activate** (开通).
 
-**1d. Configure event subscriptions** ⚠️ This step is critical
+![Permission scopes configuration](images/step1c-permissions.png)
+
+#### 1d. Configure event subscriptions ⚠️
+
+> **This step is critical.** If you skip it or choose the wrong subscription
+> method, the bot can send messages but **cannot receive** them.
 
 Left menu → **Event Subscriptions** (事件与回调):
 
@@ -54,11 +65,9 @@ Left menu → **Event Subscriptions** (事件与回调):
 2. Click **Add Event** (添加事件) → search `im.message.receive_v1` → add it.
    The full name is "Receive Messages v2.0" (接收消息 v2.0).
 
-> ⚠️ If you skip this step or choose HTTP callback instead of Long Connection,
-> the bot will be able to **send** messages but **not receive** them. This is
-> the most common setup mistake.
+![Event subscription: Long Connection + im.message.receive_v1](images/step1d-event-subscription.png)
 
-**1e. Publish and approve**
+#### 1e. Publish and approve
 
 Left menu → **App Release** (版本管理与发布):
 - Click **Create Version** (创建版本) → fill in version notes → **Submit**
@@ -70,12 +79,14 @@ Left menu → **App Release** (版本管理与发布):
 > After any permission or event subscription change, you must **publish a new
 > version** for it to take effect. This is easy to forget.
 
-**1f. Verify the bot is live**
+![Publish a new version](images/step1e-publish.png)
+
+#### 1f. Verify the bot is live
 
 Open Feishu → search your bot name → you should see it as a contact. If not,
 check that the version is published and approved.
 
-**2. Add the marketplace and install the plugin.**
+### 2. Install the plugin
 
 These are Claude Code commands — run `claude` to start a session first.
 
@@ -94,7 +105,7 @@ claude plugin install feishu@claude-feishu-plugin
 Restart your session or run `/reload-plugins`. Check that `/feishu:configure`
 tab-completes.
 
-**3. Give the server the credentials.**
+### 3. Save credentials
 
 ```
 /feishu:configure cli_xxx your_app_secret
@@ -104,9 +115,9 @@ Writes `FEISHU_APP_ID=...` and `FEISHU_APP_SECRET=...` to
 `~/.claude/channels/feishu/.env`. You can also write that file by hand, or set
 the variables in your shell environment — shell takes precedence.
 
-**4. Relaunch with the channel flag.**
+### 4. Launch with channel flag
 
-The server won't connect without this — exit your session and start a new one:
+Exit your session and start a new one:
 
 ```bash
 claude --dangerously-load-development-channels plugin:feishu@claude-feishu-plugin
@@ -117,7 +128,7 @@ claude --dangerously-load-development-channels plugin:feishu@claude-feishu-plugi
 > Use `--dangerously-load-development-channels` instead — it has the same
 > functionality but skips the allowlist check.
 
-**5. Pair.**
+### 5. Pair
 
 DM your bot on Feishu — it replies with a 6-character pairing code. In your
 assistant session:
@@ -128,11 +139,14 @@ assistant session:
 
 Your next DM reaches the assistant.
 
-**6. Lock it down.**
+### 6. Lock it down
 
 Pairing is for capturing IDs. Once you're in, switch to `allowlist` so
-strangers don't get pairing-code replies. Ask Claude to do it, or
-`/feishu:access policy allowlist` directly.
+strangers don't get pairing-code replies:
+
+```
+/feishu:access policy allowlist
+```
 
 ## Access control
 
@@ -146,9 +160,9 @@ is `pairing`. `ackReaction` uses Feishu emoji types like `THUMBSUP`.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading and `files` (absolute paths) for attachments. Images send as photos; other types send as files. Max 50MB each. Auto-chunks text; files send as separate messages after the text. Returns the sent message ID(s). |
-| `react` | Add an emoji reaction to a message by ID. Uses Feishu emoji types (e.g. `THUMBSUP`, `HEART`, `SMILE`). |
-| `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
+| `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for threading and `files` (absolute paths) for attachments. Images send as photos; other types as files. Max 50 MB. Auto-chunks long text. |
+| `react` | Add an emoji reaction to a message by ID. Uses Feishu emoji types (`THUMBSUP`, `HEART`, `SMILE`, etc.). |
+| `edit_message` | Edit a message the bot previously sent. Useful for progress → result updates. |
 
 ## Photos
 
